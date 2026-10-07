@@ -1,4 +1,6 @@
+
 import os
+# pyrefly: ignore [missing-import]
 import environ
 from pathlib import Path
 
@@ -18,6 +20,9 @@ SECRET_KEY = env('SECRET_KEY', default='django-insecure-default-key-change-me')
 DEBUG = env('DEBUG', default=False)
 
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['*'])
+
+# Google Gemini API Key
+GEMINI_API_KEY = env('GEMINI_API_KEY', default='')
 
 # Application definition
 INSTALLED_APPS = [

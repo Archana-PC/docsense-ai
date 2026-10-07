@@ -1,61 +1,106 @@
-# DocSense AI - Project Skeleton
+# DocSense AI — RAG Document Intelligence Platform
 
-This repository contains the project skeleton for **DocSense AI**, a RAG-based document Q&A application.
-
-## Project Architecture
-*   **Backend**: Django project (`docsense`) with an app (`documents`). Uses Django REST Framework for endpoints.
-*   **Database**: PostgreSQL with `pgvector` enabled (via the `pgvector/pgvector:pg16` Docker image).
-*   **Async Processing**: Celery task manager utilizing Redis as the message broker.
-*   **Frontend**: React client scaffolded with Vite.
-*   **Containerization**: Fully configured with Docker and Docker Compose.
+**DocSense AI** is a production-grade **Retrieval-Augmented Generation (RAG)** application designed for intelligent document question-answering and semantic search.
 
 ---
 
-## Prerequisites
-*   Docker and Docker Compose installed on your system.
+## Architecture & Tech Stack
+
+```
+                     ┌────────────────────────────────────────────────────────┐
+                     │              Frontend (React 19 + Vite)                │
+                     │                 http://localhost:5173                  │
+                     └───────────────▲────────────────────────▲───────────────┘
+                                     │                        │
+                   POST /api/documents/upload/        POST /api/documents/<id>/chat/
+                                     │                        │
+                                     ▼                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                Django REST API (Backend)                                    │
+│                                  http://localhost:8000                                      │
+└──────────────┬───────────────────────────────┬──────────────────────────────▲───────────────┘
+               │                               │                              │
+         Saves metadata             Dispatches Task `extract_text`            │
+               │                               │                              │
+               ▼                               ▼                              │
+┌─────────────────────────────┐  ┌───────────────────────────┐                │
+│    PostgreSQL 16 + pgvector │  │       Redis Broker        │                │
+│    (docsense_db:5432)       │  │   (docsense_redis:6379)   │                │
+└──────────────▲──────────────┘  └─────────────┬─────────────┘                │
+               │                               │                              │
+               │                               ▼                              │
+               │                 ┌───────────────────────────┐                │
+               │                 │       Celery Worker       │                │
+               └─────────────────┤  (docsense_celery_worker) ├────────────────┘
+                   Stores chunks │   - pdfplumber text parser│
+                   & 768-d vectors│  - Text chunking engine  │
+                                 │   - Gemini embeddings     │
+                                 └───────────────────────────┘
+```
+
+* **Frontend**: React 19 SPA scaffolded with Vite, styled with modern dark glassmorphism, featuring split-pane document reader, interactive AI chat, source citations, and chunk viewer.
+* **Backend**: Django 5.0 + Django REST Framework.
+* **Vector Store**: PostgreSQL 16 with the native `pgvector` extension and `VectorField(dimensions=768)`.
+* **Async Task Queue**: Celery 5.3 worker with Redis 7 broker.
+* **AI Engine**: Google Gemini API (`models/text-embedding-004` for 768-dim embeddings and `gemini-1.5-flash` for RAG Q&A).
+* **Containerization**: Full Docker & Docker Compose orchestration.
 
 ---
 
 ## Getting Started
 
-1.  **Clone / Navigate to the Directory**:
-    ```bash
-    cd /home/archana/Projects/docsense-ai
-    ```
+### 1. Prerequisites
+* Docker and Docker Compose installed on your system.
+* (Optional) A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey) (Free tier available).
 
-2.  **Start the Services**:
-    Run Docker Compose to spin up all containers (Database, Redis, Django backend, Celery worker, React frontend):
-    ```bash
-    docker compose up --build
-    ```
+### 2. Configure Environment Variables
+In your root `.env` file:
+```env
+DEBUG=True
+SECRET_KEY=your-django-secret-key
+ALLOWED_HOSTS=localhost,127.0.0.1,backend,web
+DATABASE_URL=postgres://postgres:postgres@db:5432/docsense
+CELERY_BROKER_URL=redis://redis:6379/0
 
-3.  **Access the Applications**:
-    *   **Frontend Client**: [http://localhost:5173](http://localhost:5173)
-    *   **Backend Health Check**: [http://localhost:8000/api/health/](http://localhost:8000/api/health/)
-    *   **Celery Health Check**: [http://localhost:8000/api/health/celery/](http://localhost:8000/api/health/celery/)
+# Optional: You can also set this directly in the React UI
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+### 3. Start the Application
+```bash
+docker compose up -d --build
+```
+
+### 4. Access the Applications
+* **Web Client**: [http://localhost:5173](http://localhost:5173)
+* **API Root**: [http://localhost:8000/api/](http://localhost:8000/api/)
+* **Health Check**: [http://localhost:8000/api/health/](http://localhost:8000/api/health/)
 
 ---
 
-## API Endpoints
+## API Endpoints Reference
 
-### 1. General Health Check
-*   **URL**: `/api/health/`
-*   **Method**: `GET`
-*   **Response**:
-    ```json
-    {
-      "status": "ok"
-    }
-    ```
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/health/` | `GET` | Backend service health check |
+| `/api/health/celery/` | `GET` | Dispatches dummy background Celery task |
+| `/api/config/status/` | `GET` | Returns AI model and vector engine status |
+| `/api/documents/` | `GET` | Lists all uploaded documents with chunk counts |
+| `/api/documents/upload/` | `POST` | Uploads PDF and triggers background chunking & embedding |
+| `/api/documents/<id>/status/` | `GET` | Polls document processing status (`pending`, `processing`, `done`) |
+| `/api/documents/<id>/` | `GET` / `DELETE` | Retrieves full document metadata or deletes document |
+| `/api/documents/<id>/chunks/` | `GET` | Lists generated text chunks, page numbers, and vector status |
+| `/api/documents/<id>/chat/` | `POST` | Single-shot semantic search + Gemini RAG answer |
+| `/api/documents/<id>/sessions/` | `GET` / `POST` | Lists or creates multi-turn chat threads for a document |
+| `/api/sessions/<id>/` | `GET` / `DELETE` | Retrieves full message history of a thread or deletes it |
+| `/api/sessions/<id>/chat/` | `POST` | Sends follow-up message with conversation memory |
 
-### 2. Celery Health Check
-*   **URL**: `/api/health/celery/`
-*   **Method**: `GET`
-*   **Response**:
-    ```json
-    {
-      "status": "triggered",
-      "task_id": "uuid-here"
-    }
-    ```
-    *Note: This triggers a background task `ping_task` which sleeps for 2 seconds and returns `"pong"`. Check the logs of the `docsense_celery_worker` container to verify.*
+### Example Chat Request:
+```bash
+curl -X POST http://localhost:8000/api/documents/1/chat/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What are the main findings in section 2?",
+    "api_key": "optional-key-if-not-in-env"
+  }'
+```
