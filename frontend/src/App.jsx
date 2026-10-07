@@ -318,7 +318,7 @@ function App() {
     }
   };
 
-  // Send Chat Question with Conversation Memory
+  // Send Chat Question with Real-time SSE Token Streaming & Memory
   const handleSendQuestion = async (promptText) => {
     const query = (promptText || inputQuestion).trim();
     if (!query || !activeSessionId || asking) return;
@@ -333,62 +333,99 @@ function App() {
       created_at: new Date().toISOString()
     };
 
-    setMessages(prev => [...prev, tempUserMsg]);
-    addLog(`[Memory Thread #${activeSessionId}] Sent: "${query}"`, 'info');
+    const tempAiId = Date.now() + 1;
+    const tempAiMsg = {
+      id: tempAiId,
+      role: 'assistant',
+      content: '',
+      sources: [],
+      created_at: new Date().toISOString(),
+      isStreaming: true
+    };
+
+    setMessages(prev => [...prev, tempUserMsg, tempAiMsg]);
+    addLog(`[SSE Stream Thread #${activeSessionId}] Sent: "${query}"`, 'info');
 
     try {
       const payload = { question: query };
       if (apiKey) payload.api_key = apiKey;
 
-      const res = await fetch(`/api/sessions/${activeSessionId}/chat/`, {
+      const res = await fetch(`/api/sessions/${activeSessionId}/stream_chat/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      const data = await res.json();
-
-      if (res.ok) {
-        const aiMsg = {
-          id: data.assistant_message_id,
-          role: 'assistant',
-          content: data.answer,
-          sources: data.sources || [],
-          created_at: new Date().toISOString()
-        };
-        setMessages(prev => [...prev, aiMsg]);
-
-        // Update session title in session list if changed
-        if (data.session_title) {
-          setSessions(prev => prev.map(s => 
-            s.id === activeSessionId ? { ...s, title: data.session_title } : s
-          ));
-        }
-
-        addLog(`AI answered with ${data.sources?.length || 0} citations (Contextualized: "${data.search_query || query}")`, 'success');
-      } else {
-        if (data.needs_api_key) {
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        if (errData.needs_api_key) {
           setShowKeyModal(true);
         }
-        const errorMsg = {
-          id: Date.now() + 1,
-          role: 'assistant',
-          content: `⚠️ Error: ${data.error || 'Failed to generate answer.'}`,
-          sources: [],
-          created_at: new Date().toISOString()
-        };
-        setMessages(prev => [...prev, errorMsg]);
-        addLog(`Chat error: ${data.error}`, 'error');
+        throw new Error(errData.error || `Server responded with status ${res.status}`);
       }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let accumulatedText = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop(); // keep last partial chunk
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          const jsonStr = trimmed.slice(6);
+          try {
+            const event = JSON.parse(jsonStr);
+
+            if (event.type === 'start') {
+              setMessages(prev => prev.map(m => 
+                m.id === tempAiId 
+                  ? { ...m, sources: event.sources || [] } 
+                  : m
+              ));
+              addLog(`Retrieved ${event.sources?.length || 0} vector sources for query "${event.search_query || query}"`, 'info');
+            } else if (event.type === 'token') {
+              accumulatedText += event.token;
+              setMessages(prev => prev.map(m => 
+                m.id === tempAiId 
+                  ? { ...m, content: accumulatedText } 
+                  : m
+              ));
+            } else if (event.type === 'done') {
+              setMessages(prev => prev.map(m => 
+                m.id === tempAiId 
+                  ? { ...m, id: event.assistant_message_id || tempAiId, isStreaming: false } 
+                  : m
+              ));
+              if (event.session_title) {
+                setSessions(prev => prev.map(s => 
+                  s.id === activeSessionId ? { ...s, title: event.session_title } : s
+                ));
+              }
+              addLog(`Stream completed successfully for Thread #${activeSessionId}`, 'success');
+            } else if (event.type === 'error') {
+              throw new Error(event.error);
+            }
+          } catch (pErr) {
+            console.error('Error parsing SSE event:', pErr);
+          }
+        }
+      }
+
     } catch (err) {
-      const errorMsg = {
-        id: Date.now() + 1,
-        role: 'assistant',
-        content: `⚠️ Network error: ${err.message}`,
-        sources: [],
-        created_at: new Date().toISOString()
-      };
-      setMessages(prev => [...prev, errorMsg]);
+      setMessages(prev => prev.map(m => 
+        m.id === tempAiId 
+          ? { ...m, content: `⚠️ Error: ${err.message}`, isStreaming: false } 
+          : m
+      ));
+      addLog(`Streaming error: ${err.message}`, 'error');
     } finally {
       setAsking(false);
     }
@@ -694,6 +731,12 @@ function App() {
                           <div className={`chat-bubble ${msg.role === 'user' ? 'user' : 'ai'}`}>
                             <div className="chat-text-content" style={{ whiteSpace: 'pre-wrap' }}>
                               {msg.content}
+                              {msg.isStreaming && <span className="stream-cursor">▋</span>}
+                              {msg.isStreaming && !msg.content && (
+                                <span className="streaming-placeholder">
+                                  <RefreshCw size={14} className="spinner" /> Reasoning & retrieving sources...
+                                </span>
+                              )}
                             </div>
 
                             {/* Source Citations */}
@@ -723,15 +766,6 @@ function App() {
                           </div>
                         </div>
                       ))}
-                      {asking && (
-                        <div className="chat-bubble-wrap ai">
-                          <div className="chat-sender-label">DocSense AI is reasoning...</div>
-                          <div className="chat-bubble ai thinking">
-                            <RefreshCw size={16} className="spinner" />
-                            <span>Contextualizing with conversation memory & generating response...</span>
-                          </div>
-                        </div>
-                      )}
                       <div ref={chatBottomRef} />
                     </div>
                   )}

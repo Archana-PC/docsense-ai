@@ -766,6 +766,27 @@
   color: var(--text-secondary);
 }
 
+.stream-cursor {
+  display: inline-block;
+  color: #818cf8;
+  font-weight: 700;
+  margin-left: 2px;
+  animation: cursor-blink 0.8s infinite;
+}
+
+.streaming-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
 /* Sources / Citations in Chat */
 .sources-container {
   margin-top: 1rem;

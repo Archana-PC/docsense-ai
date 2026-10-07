@@ -165,3 +165,59 @@ ANSWER:"""
 
     response = model.generate_content(prompt)
     return response.text
+
+
+def stream_answer_with_context(
+    question: str, 
+    context_chunks: List[Dict[str, Any]], 
+    chat_history: Optional[List[Dict[str, str]]] = None,
+    api_key: Optional[str] = None
+):
+    """
+    Stream token chunks in real time as Gemini generates the response.
+    Yields string text chunks.
+    """
+    key = get_api_key(api_key)
+    if not key:
+        raise ValueError(
+            "Gemini API key is not configured. Please add GEMINI_API_KEY to your .env file."
+        )
+
+    genai.configure(api_key=key)
+    model = genai.GenerativeModel(CHAT_MODEL)
+
+    formatted_context = ""
+    for idx, chunk in enumerate(context_chunks, 1):
+        page_info = f" (Page {chunk.get('page_number')})" if chunk.get('page_number') else ""
+        formatted_context += f"--- Source Snippet {idx}{page_info} ---\n{chunk['content']}\n\n"
+
+    formatted_history = ""
+    if chat_history:
+        formatted_history = "PREVIOUS CONVERSATION TURNS:\n"
+        for msg in chat_history[-6:]:
+            role_label = "User" if msg.get('role') == 'user' else "Assistant"
+            formatted_history += f"{role_label}: {msg.get('content', '')}\n"
+        formatted_history += "\n"
+
+    prompt = f"""You are DocSense AI, an expert document intelligence assistant.
+Your task is to accurately answer the user's question using the provided document context below, while maintaining conversational continuity with previous turns.
+
+Instructions:
+1. Ground your answer strictly in the provided document context sources.
+2. If the user asks a follow-up question, use the previous conversation history to understand pronouns and context.
+3. If the answer cannot be found in the document context, state: "I cannot find the answer to this question in the uploaded document."
+4. Reference specific pages whenever available (e.g. "[Page 2]").
+5. Format your answer with clear markdown (bullet points, bold text).
+
+{formatted_history}DOCUMENT CONTEXT SOURCES:
+{formatted_context}
+
+CURRENT QUESTION:
+{question}
+
+ANSWER:"""
+
+    response = model.generate_content(prompt, stream=True)
+    for chunk in response:
+        if chunk.text:
+            yield chunk.text

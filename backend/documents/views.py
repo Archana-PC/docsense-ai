@@ -1,4 +1,6 @@
 import logging
+import json
+from django.http import StreamingHttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -11,7 +13,8 @@ from .services.gemini import (
     is_gemini_configured,
     generate_embedding,
     contextualize_query,
-    answer_question_with_context
+    answer_question_with_context,
+    stream_answer_with_context
 )
 
 logger = logging.getLogger(__name__)
@@ -478,3 +481,141 @@ class SessionChatView(APIView):
                 {"error": f"Failed to generate answer: {str(e)}"}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class SessionStreamChatView(APIView):
+    """
+    POST /api/sessions/<session_id>/stream_chat/
+    Streams AI answer tokens in real time via Server-Sent Events (SSE).
+    """
+    def post(self, request, session_id):
+        question = request.data.get('question', '').strip()
+        custom_api_key = request.data.get('api_key', '').strip() or None
+
+        if not question:
+            return Response({"error": "Question is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            session = ChatSession.objects.get(id=session_id)
+        except ChatSession.DoesNotExist:
+            return Response({"error": "Chat session not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        document = session.document
+        if document.status != 'done':
+            return Response(
+                {"error": f"Document is not ready (Current status: {document.status})."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if document.chunks.count() == 0:
+            return Response(
+                {"error": "No text chunks found for this document to answer questions."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not is_gemini_configured(custom_api_key):
+            return Response({
+                "error": "Google Gemini API Key is required to perform semantic search and generate answers.",
+                "needs_api_key": True,
+                "instruction": "Please set GEMINI_API_KEY in your .env file or provide 'api_key' in the request."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # 1. Fetch conversation history
+            past_messages = list(session.messages.all().order_by('created_at'))
+            chat_history = [
+                {"role": m.role, "content": m.content} 
+                for m in past_messages[-10:]
+            ]
+
+            # 2. Contextualize query
+            search_query = contextualize_query(question, chat_history, custom_api_key)
+
+            # 3. Vector Similarity Search via pgvector
+            query_vector = generate_embedding(search_query, api_key=custom_api_key, is_query=True)
+            top_k = 4
+            matching_chunks = document.chunks.annotate(
+                distance=CosineDistance('embedding', query_vector)
+            ).order_by('distance')[:top_k]
+
+            context_chunks = []
+            sources = []
+            for chunk in matching_chunks:
+                context_chunks.append({
+                    "chunk_index": chunk.chunk_index,
+                    "page_number": chunk.page_number,
+                    "content": chunk.content
+                })
+                sources.append({
+                    "chunk_index": chunk.chunk_index,
+                    "page_number": chunk.page_number,
+                    "snippet": chunk.content[:160] + "..." if len(chunk.content) > 160 else chunk.content,
+                    "similarity": round(float(1 - (chunk.distance if hasattr(chunk, 'distance') and chunk.distance is not None else 1)), 3)
+                })
+
+            # Save user message immediately in DB
+            ChatMessage.objects.create(
+                session=session,
+                role='user',
+                content=question
+            )
+
+            def event_stream():
+                # Initial event sending metadata and sources
+                start_payload = {
+                    "type": "start",
+                    "sources": sources,
+                    "search_query": search_query
+                }
+                yield f"data: {json.dumps(start_payload)}\n\n"
+
+                full_answer = []
+                try:
+                    for token in stream_answer_with_context(
+                        question=question,
+                        context_chunks=context_chunks,
+                        chat_history=chat_history,
+                        api_key=custom_api_key
+                    ):
+                        full_answer.append(token)
+                        token_payload = {"type": "token", "token": token}
+                        yield f"data: {json.dumps(token_payload)}\n\n"
+
+                    final_text = "".join(full_answer)
+
+                    # Persist assistant response in DB
+                    ai_msg = ChatMessage.objects.create(
+                        session=session,
+                        role='assistant',
+                        content=final_text,
+                        sources=sources
+                    )
+
+                    # Update session title if default
+                    if session.title in ['New Conversation', 'New Chat']:
+                        summary_title = question[:40] + ('...' if len(question) > 40 else '')
+                        session.title = summary_title
+                        session.save(update_fields=['title', 'updated_at'])
+                    else:
+                        session.save(update_fields=['updated_at'])
+
+                    done_payload = {
+                        "type": "done",
+                        "assistant_message_id": ai_msg.id,
+                        "session_title": session.title
+                    }
+                    yield f"data: {json.dumps(done_payload)}\n\n"
+
+                except Exception as e:
+                    logger.exception("Error during streaming generation")
+                    err_payload = {"type": "error", "error": str(e)}
+                    yield f"data: {json.dumps(err_payload)}\n\n"
+
+            response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+            response['Cache-Control'] = 'no-cache'
+            response['X-Accel-Buffering'] = 'no'
+            return response
+
+        except Exception as e:
+            logger.exception("Error initiating stream chat")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

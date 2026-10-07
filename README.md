@@ -94,6 +94,7 @@ docker compose up -d --build
 | `/api/documents/<id>/sessions/` | `GET` / `POST` | Lists or creates multi-turn chat threads for a document |
 | `/api/sessions/<id>/` | `GET` / `DELETE` | Retrieves full message history of a thread or deletes it |
 | `/api/sessions/<id>/chat/` | `POST` | Sends follow-up message with conversation memory |
+| `/api/sessions/<id>/stream_chat/` | `POST` | Streams AI answer tokens in real-time via Server-Sent Events (SSE) |
 
 ### Example Chat Request:
 ```bash

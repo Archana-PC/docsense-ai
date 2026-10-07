@@ -12,6 +12,7 @@ from .views import (
     ChatSessionListCreateView,
     ChatSessionDetailView,
     SessionChatView,
+    SessionStreamChatView,
 )
 
 urlpatterns = [
@@ -27,4 +28,5 @@ urlpatterns = [
     path('documents/<int:id>/sessions/', ChatSessionListCreateView.as_view(), name='document_sessions'),
     path('sessions/<int:session_id>/', ChatSessionDetailView.as_view(), name='session_detail'),
     path('sessions/<int:session_id>/chat/', SessionChatView.as_view(), name='session_chat'),
+    path('sessions/<int:session_id>/stream_chat/', SessionStreamChatView.as_view(), name='session_stream_chat'),
 ]
